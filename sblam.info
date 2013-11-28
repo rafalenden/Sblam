@@ -1,0 +1,5 @@
+name = Sblam
+description = Antispam filter for forms on the web.
+package = Spam control
+core = 7.x
+configure = admin/config/content/sblam

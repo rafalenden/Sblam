@@ -1,0 +1,8 @@
+.form-item .sblam-form + label.option {
+  font-size: 1.1em;
+}
+
+#edit-sblam-protected-forms .form-type-checkboxes {
+  margin-left: 25px;
+  padding-top: 0;
+}

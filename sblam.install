@@ -1,0 +1,41 @@
+<?php
+
+/**
+ * Implements hook_requirements().
+ */
+function sblam_requirements($phase) {
+  $t = get_t();
+  $requirements = array();
+  if (!function_exists('fsockopen')) {
+    $requirements['sblam_fsockopen'] += array(
+      'severity' => REQUIREMENT_ERROR,
+      'description' => $t('Sblam requires the PHP <a href="@fsockopen_url">fsockopen function</a>.', array('@fsockopen' => 'http://php.net/function.fsockopen')),
+    );
+  }
+  return $requirements;
+}
+
+/**
+ * Implements hook_install().
+ */
+function sblam_install() {
+  // $sblam_api_key = sblam_generate_api_key();
+  // if (!empty($sblam_api_key)) {
+  //   variable_set('sblam_api_key', $sblam_api_key);
+  // }
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function sblam_uninstall() {
+  db_delete('variable')
+    ->condition('name', db_like('sblam_') . '%', 'LIKE')
+    ->execute();
+  $cache_tables = array('variables', 'cache_bootstrap');
+  foreach ($cache_tables as $table) {
+    if (db_table_exists($table)) {
+      cache_clear_all($table, 'cache');
+    }
+  }
+}

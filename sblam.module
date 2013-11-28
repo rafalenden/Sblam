@@ -1,0 +1,363 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function sblam_menu() {
+  $items = array();
+  $items['admin/config/content/sblam'] = array(
+    'title' => 'Sblam settings',
+    'description' => 'Antispam filter for forms on the web..',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('sblam_settings_form'),
+    'access arguments' => array('administer sblam'),
+    'file' => 'sblam.admin.inc',
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_perm().
+ */
+function sblam_perm() {
+  return array(
+    'administer sblam' => array(
+      'title' => t('Administer Sblam settings'),
+    ),
+    'bypass sblam protection' => array(
+      'title' => t('Bypass Sblam protection'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_form_alter().
+ *
+ * Add Sblam protection to forms enabled in the Sblam admin interface.
+ */
+function sblam_form_alter(&$form, &$form_state, $form_id) {
+  // Don't use for maintenance mode forms (install, update, etc.).
+  if (defined('MAINTENANCE_MODE') /* || user_access('bypass sblam protection') */ ) {
+    return;
+  }
+
+  $protected_forms = variable_get('sblam_protected_forms', array());
+
+  // Add form protection to admin-configured forms.
+  if (isset($protected_forms[$form_id]) && !empty($protected_forms[$form_id]['enabled'])) {
+    sblam_form_add_protection($form, $form_state, $form_id);
+  }
+}
+
+/**
+ * Form builder function to add different types of protection to forms.
+ *
+ * @return $form_elements
+ *   Returns elements to be placed in a form's elements array to prevent spam.
+ */
+function sblam_form_add_protection(&$form, &$form_state, $form_id) {
+  $protected_forms = variable_get('sblam_protected_forms', array());
+
+  // If form is not enabled in admin UI.
+  if (!isset($protected_forms[$form_id]) || empty($protected_forms[$form_id]['enabled'])) {
+    return;
+  }
+
+  $form_state['#sblam_protected_form'] = $protected_forms[$form_id];
+  $form_state['#sblam_values'] = $protected_forms[$form_id];
+
+  // Allow other modules to alter the protections applied to this form.
+  drupal_alter('sblam_form_protections', $form);
+
+  $form['#prefix'] = '<h2 style="color: red">PROTECTED FORM</h2>';
+
+  $form['#suffix'] = isset($form['#suffix']) ? $form['#suffix'] . sblamchallange()
+     : sblamchallange();
+  $form['#validate'][] = 'sblam_form_validate';
+}
+
+function sblam_form_get_flatten_elements($form) {
+  $enabled_fields = $form_state['#sblam_protected_form']['fields'];
+  $flattened_fields = array();
+
+  foreach ($enabled_fields as $key => $field) {
+    if (isset($form_state['values'][$field][$language->language]['value'])) {
+      $flattened_fields[$key] = $field . '[' . $language->language . '][0][value]';
+    }
+    // Informacja o głębokości tablic
+    dpm(max(array_map('count', $form_state['values'][$field])), $field);
+  }
+  return $flattened_fields;
+}
+
+/**
+ * Form validation handler to perform post-validation tasks.
+ */
+function sblam_form_validate(&$form, &$form_state) {
+  global $language;
+
+  $fields = sblam_form_get_flatten_elements($form);
+  $result = sblamtestpost($fields, variable_get('sblam_api_key'));
+
+  // Spam cllassification handling.
+  switch ($result) {
+    case 2: // Signals certain spam, which can be deleted without hesitation.
+    case 1: // Signals probable spam (which you might want to queue for moderation or show captcha).
+      form_set_error('sblam', t('Your submission has triggered the spam filter and will not be accepted.'));
+      break;
+    // Signals an error. Post has not been checked.
+    case 0:
+      $fallback = variable_get('sblam_fallback', 0);
+      if ($fallback == 1) {
+        form_set_error('sblam', t('The spam filter installed on this site is currently unavailable. Per site policy, we are unable to accept new submissions until that problem is resolved. Please try resubmitting the form in a couple of minutes.'));
+      }
+      break;
+    case -1: // Propably not a spam.
+    case -2: // For sure this is not a spam.
+      // drupal_set_message('Post jest OK');
+      //form_set_error('sblam', t('Sblam: Post jest ok.'));
+      break;
+    default:
+      form_set_error('sblam', t('Sblam: Unknown error.'));
+  }
+}
+
+function sblam_test_post($fields, $apikey = NULL) {
+  if (!$apikey) {
+    $apikey = variable_get('sblam_api_key', 'default');
+  }
+
+  foreach ($fields as $key => $value) {
+
+  }
+
+  $in = array(
+    'uid' => _sblamserveruid(),
+    'uri' => request_uri(),
+    'host' => empty($_SERVER['HTTP_HOST']) ? $_SERVER['SERVER_NAME'] : $_SERVER['HTTP_HOST'],
+    'ip' => ip_address(),
+    'time' => REQUEST_TIME,
+    'cookies' => count($_COOKIE) ? 1 : 0,
+    'session' => isset($_COOKIE[session_name()]) ? 1 : 0,
+    'sblamcookie' => isset($_COOKIE['sblam_']) ? $_COOKIE['sblam_'] : '',
+    'salt' => 'x' . mt_rand() . time(),
+  );
+}
+
+/**
+ *  Sends fields from $_POST to check at Sblam server.
+ *
+ * @param fieldnames Array containing fields to protect.
+ * @param apikey Generated API key at http://sblam.com/key.html
+ */
+function sblamtestpost($fieldnames = NULL, $apikey = NULL) {
+  global $_sblam_last_id, $_sblam_last_error;
+  $_sblam_last_id = $_sblam_last_error = NULL;
+
+  if (!count($_POST))
+    return NULL;
+
+  if (NULL === $apikey) {
+    $apikey = "default";
+  }
+  $in = array(
+    'uid' => _sblamserveruid(),
+    'uri' => empty($_SERVER['REQUEST_URI']) ? $_SERVER['SCRIPT_NAME'] . '?' . $_SERVER['QUERY_STRING']
+       : $_SERVER['REQUEST_URI'],
+    'host' => empty($_SERVER['HTTP_HOST']) ? $_SERVER['SERVER_NAME'] : $_SERVER['HTTP_HOST'],
+    'ip' => $_SERVER['REMOTE_ADDR'],
+    'time' => time(),
+    'cookies' => count($_COOKIE) ? 1 : 0,
+    'session' => isset($_COOKIE[session_name()]) ? 1 : 0,
+    'sblamcookie' => isset($_COOKIE['sblam_']) ? $_COOKIE['sblam_'] : '',
+    'salt' => 'x' . mt_rand() . time(),
+  );
+
+  if (is_array($fieldnames)) {
+    foreach ($fieldnames as $key => $val) {
+      $in['field_' . $key] = $val;
+    }
+  }
+
+  foreach ($_POST as $key => $val) {
+    $in['POST_' . $key] = stripslashes(is_array($val) ? implode("\n", $val) : $val);
+  }
+
+  if (function_exists("getallheaders")) {
+    foreach (getallheaders() as $header => $val) {
+      $in['HTTP_' . strtr(strtoupper($header), "-", "_")] = $val;
+    }
+  }
+  else {
+    foreach ($_SERVER as $key => $val) {
+      if (substr($key, 0, 5) !== 'HTTP_') {
+        continue;
+      }
+      $in[$key] = stripslashes($val);
+    }
+  }
+  unset($in['HTTP_COOKIE']);
+  unset($in['HTTP_AUTHORIZATION']);
+
+  $data = '';
+  foreach ($in as $key => $val) {
+    $data .= strtr($key, "\0", " ") . "\0" . strtr($val, "\0", " ") . "\0";
+  }
+
+  if (strlen($data) > 300000) {
+    return 0;
+  }
+
+  if ($compress = (strlen($data) > 5000 && function_exists('gzcompress'))) {
+    $data = gzcompress($data, 1);
+  }
+
+  if (function_exists('fsockopen')) {
+    $hosts = sblam_get_servers();
+    foreach ($hosts as $host) {
+      $request = "POST / HTTP/1.1\r\n" .
+       "Host:$host\r\n" .
+       "Connection:close\r\n" .
+       "Content-Type:application/x-sblam;sig=" . md5("^&$@$2\n$apikey@@") . md5($apikey . $data) . ($compress
+          ? ";compress=gzip" : '') . "\r\n" .
+       "Content-Length:" . strlen($data) . "\r\n" .
+       "\r\n" . $data;
+
+      $fs = @fsockopen($host, 80, $errn, $errs, 5);
+      if ($fs !== false && function_exists('stream_set_timeout')) {
+        stream_set_timeout($fs, 15);
+      }
+      if ($fs !== false && fwrite($fs, $request)) {
+        $response = '';
+        while (!feof($fs)) {
+          $response .= fread($fs, 1024);
+          if (preg_match('!\r\n\r\n.*\n!', $response)) {
+            dpm($response);
+            break;
+          }
+        }
+        fclose($fs);
+        if (preg_match('!HTTP/1\..\s+(\d+\s+[^\r\n]+)\r?\n((?:[^\r\n]+\r?\n)+)\r?\n(.+)!s', $response, $out))
+          if (intval($out[1]) == 200)
+            if (preg_match('!^(-?\d+):([a-z0-9-]{0,42}):([a-z0-9]{32})!', $out[3], $res))
+              if (md5($apikey . $res[1] . $in['salt']) === $res[3]) {
+                $_sblam_last_id = $res[2];
+                return $res[1];
+              }
+              else
+                trigger_error($_sblam_last_error.="Sblam: Rezultat od serwera $host ma niepoprawny podpis\n");
+            else
+              trigger_error($_sblam_last_error.="Sblam: Awaria serwera $host. Otrzymany rezultat ma niepoprawny format " . htmlspecialchars($out[3]) . "\n");
+          else
+            trigger_error($_sblam_last_error.="Sblam: Komunikat serwera $host: " . htmlspecialchars(substr($out[1], 0, 80)) . "\n");
+        else
+          trigger_error($_sblam_last_error.="Sblam: Niepoprawny rezultat otrzymany od serwera $host\n");
+      }
+      else
+        trigger_error($_sblam_last_error.="Sblam: Problem komunikacji z serwerem $host - $errn:$errs\n");
+    }
+  }
+  else
+    trigger_error($_sblam_last_error.="Sblam: Brak wymaganego rozszerzenia sockets (fsockopen)\n");
+  return 0;
+}
+
+function sblam_generate_api_key() {
+  return check_plain(file_get_contents('http://sblam.com/keygen.html'));
+}
+
+function sblam_default_servers() {
+  return array('api.sblam.com', 'api2.sblam.com', 'spamapi.geekhood.net');
+}
+
+/** Funkcja pomocnicza dla Sblam!, która generuje identyfikator serwera (nie używaj) */
+function _sblamserveruid() {
+  return md5(phpversion() . $_SERVER['HTTP_HOST'] . __FILE__);
+}
+
+/** Podaje URL pod którym użytkownik może zgłosić błąd filtru. */
+function sblamreporturl() {
+  global $_sblam_last_id;
+  return "http://sblam.com/report/$_sblam_last_id";
+}
+
+/**
+ * Zwraca ostatni komunikat o błędzie lub NULL, jeśli sprawdzanie odbyło się bezbłędnie
+ * Wtyczka próbuje komunikacji z kilkoma serwerami, więc może zainstnieć sytuacja, że post zostanie sprawdzony mimo błędów.
+ */
+function sblamlasterror() {
+  global $_sblam_last_error;
+  return $_sblam_last_error;
+}
+
+function sblamchallange() {
+  $serveruid = _sblamserveruid();
+
+  $magic = dechex(mt_rand()) . ';' . dechex(time()) . ';' . $_SERVER['REMOTE_ADDR'];
+  $magic = addslashes(md5($serveruid . $magic) . $magic);
+
+  if (!headers_sent()) {
+    header("Content-Type: text/javascript;charset=UTF-8");
+    header("Cache-Control: private,max-age=3600");
+    setcookie('sblam_', md5($magic . $serveruid), time() + 3600);
+  }
+
+  $fieldname = 'sc' . abs(crc32($serveruid));
+
+  return <<<JS
+<script type="text/javascript">
+<!--//--><![CDATA[//><!--
+(function(){
+var f = document.getElementsByTagName('form');
+f = f && f.length && f[f.length-1]
+if (!f || f.$fieldname) return
+setTimeout(function(){
+var i = document.createElement('input')
+i.setAttribute('type','hidden')
+i.setAttribute('name','$fieldname')
+i.setAttribute('value','$magic;' + (new Date()/1000).toFixed())
+f.appendChild(i)
+/*@cc_on @*/
+/*@if (@_jscript_version < 5.9)
+	i.name = '$fieldname';
+	i.parentNode.removeChild(i); f.innerHTML += (''+i.outerHTML).replace(/>/,' name="$fieldname">');
+/*@end @*/
+var dclick,o = f.onsubmit
+f.onsubmit = function()
+{
+	if (dclick) return false
+	if (this.elements.$fieldname) this.elements.$fieldname.value += ';' + (new Date()/1000).toFixed()
+	if (!o || false !== o()) {dclick=true;setTimeout(function(){dclick=false},4000); return true}
+	return false;
+}
+},1000)
+})()
+//--><!]]>
+</script>
+JS;
+}
+
+function recursive_array_search($needle, $haystack) {
+  foreach ($haystack as $key => $value) {
+    $current_key = $key;
+    if (is_array($value))
+      $val = recursive_array_search($needle, $value);
+    if ($needle === $value OR ($val != false and $val != NULL)) {
+      if ($val == NULL)
+        return array($current_key);
+      return array_merge(array($current_key), $val);
+    }
+  }
+  return false;
+}
+
+function sblam_real_field_names($fields, $values) {
+  foreach ($fields as $field) {
+    recursive_array_search('value', $haystack);
+  }
+}
+
+function sblam_get_servers() {
+  $hosts = variable_get('sblam_servers', sblam_default_servers());
+  return preg_split("/\r\n|\n|\r/", $hosts);
+}
