@@ -85,18 +85,18 @@ function sblam_settings_form() {
         ),
       ),
     );
-  }
-  $query = db_select('webform', 'w');
-  $query->join('node', 'n', 'w.nid = n.nid');
-  $query->fields('n');
-  $webform_nodes = $query->execute()->fetchAllAssoc('nid');
-  foreach ($webform_nodes as $nid => $node) {
-    $components = db_query("SELECT form_key, name, type FROM {webform_component}
-      WHERE nid = :nid AND type IN(:types)", array(':nid' => $nid, ':types' => array('textfield', 'textarea', 'number', 'email')))->fetchAllKeyed(0, 1);
-    $protectable_forms['webform']['#forms']['webform_client_form_' . $nid] = array(
-      '#title' => $node->title,
-      '#fields' => $components,
-    );
+    $query = db_select('webform', 'w');
+    $query->join('node', 'n', 'w.nid = n.nid');
+    $query->fields('n');
+    $webform_nodes = $query->execute()->fetchAllAssoc('nid');
+    foreach ($webform_nodes as $nid => $node) {
+      $components = db_query("SELECT form_key, name, type FROM {webform_component}
+        WHERE nid = :nid AND type IN(:types)", array(':nid' => $nid, ':types' => array('textfield', 'textarea', 'number', 'email')))->fetchAllKeyed(0, 1);
+      $protectable_forms['webform']['#forms']['webform_client_form_' . $nid] = array(
+        '#title' => $node->title,
+        '#fields' => $components,
+      );
+    }
   }
 
   // Contact forms.
